@@ -1,32 +1,51 @@
-# Pi Context-Mesh Prototype
+# Pi Context-Mesh Extension Prototype
 
-This repository checkout did not include Pi runtime source, so this branch adds an isolated, reversible Python prototype harness rather than claiming integration with unverified Pi APIs.
+A minimal TypeScript Pi extension/package prototype for validating context-addressable inter-agent messaging:
+
+```text
+message = compact summary + contextRef
+```
+
+The sender's full Pi session context is not copied into the receiver's working context. Receivers explicitly call `query_context` when they need a relevant slice.
+
+## Installation
+
+This repository is a standalone package prototype. Build it with the TypeScript compiler available in the environment:
+
+```bash
+npm run build
+```
+
+In a Pi extension workspace, expose `activate` from `dist/index.js` and call it with Pi's `ExtensionAPI` and `ExtensionContext`.
 
 ## Architecture
 
-- `ContextMeshHarness` coordinates tasks, compact inter-agent messages, and explicit context lookup.
-- `JsonContextStore` persists full contexts and task records in a JSON file.
-- Workers are stateless callables. They receive a task and a compact message containing `summary + context_ref`.
-- Full sender context is never copied into the receiver's initial working context.
+- `spawn_context_mesh_task` creates a `MeshTask` and a compact `MeshMessage`.
+- `contextRef` points at a Pi session/leaf: `ctx:pi-session:<session-id>#leaf:<entry-id>`.
+- `query_context` resolves `contextRef + query` into relevant snippets from registered Pi session entries.
+- Task metadata is persisted with Pi custom entries; compact child results can be appended as Pi custom messages.
+- Child execution uses Pi's subagent/SDK pattern via a small `ChildRunner` adapter, not a new agent runtime.
 
-## Running the prototype
+## Example parent/child exchange
+
+1. Parent session contains: `Requirement: every command function must be idempotent.`
+2. Parent calls `spawn_context_mesh_task` with summary `Assess StartMotor against the command-function requirement.`
+3. Child initially receives only that summary and `ctx:pi-session:parent-session#leaf:p3`.
+4. Child calls `query_context({ contextRef, query: "idempotent command function requirement" })`.
+5. Child returns summary `StartMotor violates the idempotence requirement...` plus `ctx:pi-session:child-session#leaf:c2`.
+6. Parent initially sees only the summary and child context reference, then queries the child context for evidence if needed.
+
+## Running the demo tests
 
 ```bash
-python -m pytest
+npm test
 ```
 
-## Example interaction
-
-1. Parent task `T1` stores full PLC rule/function context as `ctx:T1`.
-2. Parent spawns child task `T2` with only a summary and `ctx:T1`.
-3. Child verifies its initial message does not contain the full parent context.
-4. Child calls `query_context("ctx:T1", "FORBIDDEN_LITERAL")` to retrieve evidence.
-5. Child stores its own full evidence context as `ctx:T2` and returns only a compact summary plus `ctx:T2`.
-6. Parent can query `ctx:T2` when it needs more evidence.
+The tests use deterministic mock Pi sessions and a mock `ChildRunner` to prove the protocol without calling an LLM.
 
 ## Known limitations
 
-- Not wired to real Pi extension hooks because no Pi source or extension API exists in this checkout.
-- Retrieval is simple case-insensitive line search.
-- Execution is synchronous and in-process.
-- No production scheduler, durable locking, distributed infrastructure, authentication, or vector database is included.
+- No task DAG scheduler or worker pool.
+- No vector database/RAG; retrieval is exact keyword search.
+- No Pi core changes.
+- Session indexing is in-memory for the vertical slice; v0.2 should use Pi's real persisted session index or a tiny extension-owned index.

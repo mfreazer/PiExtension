@@ -1,78 +1,91 @@
-# Context-Mesh Prototype Design
+# Context-Mesh Pi Extension Design
 
 ## Goal
 
-Demonstrate that inter-agent messages can carry only a compact summary plus an addressable context reference, while the full context remains stored outside the receiving worker's initial working context.
+Validate the primitive:
+
+```text
+MESSAGE = SUMMARY + CONTEXT_REFERENCE
+```
+
+The receiver gets a compact summary and an opaque `contextRef`; it must explicitly call `query_context` to retrieve a relevant slice of the referenced Pi session context.
 
 ## Architecture
 
 ```text
-+-----------------------------+
-| ContextMeshHarness           |
-| - creates tasks              |
-| - validates messages         |
-| - stores addressable context |
-| - exposes query_context      |
-+--------------+--------------+
-               |
-               | task message: summary + context_ref
-               v
-+-----------------------------+
-| Stateless worker function    |
-| - receives working context   |
-| - explicitly queries refs    |
-| - returns summary + ctx ref  |
-+-----------------------------+
+Pi parent session
+    |
+    | spawn_context_mesh_task({ objective, summary })
+    v
+Context-Mesh extension
+    |  creates MeshTask
+    |  persists task metadata as Pi custom entry
+    |  sends only MeshMessage(summary + contextRef)
+    v
+Child Pi session / subagent pattern
+    |
+    | query_context({ contextRef, query })
+    v
+Referenced Pi session entries
+    |
+    v
+Child result: { summary, contextRef, status }
 ```
 
-## Data model
+## Pi APIs used
 
-### Task
+The implementation is intentionally shaped around the upstream Pi APIs identified in `docs/context-mesh-pi-investigation.md`:
+
+- `ExtensionAPI.registerTool` for `spawn_context_mesh_task` and `query_context`.
+- `ExtensionAPI.appendEntry` for `context-mesh.task` and `context-mesh.result` custom/custom-message entries.
+- `ReadonlySessionManager.getSessionId`, `getLeafId`, `getEntries`, and `getBranch` as the addressable session/context substrate.
+- Pi custom entries for extension-owned task metadata that should not pollute model context.
+
+## Source structure
+
+- `src/protocol.ts` defines `MeshMessage`, `MeshResult`, status types, and validation.
+- `src/context-ref.ts` creates/parses opaque `ctx:pi-session:<session-id>#leaf:<entry-id>` references.
+- `src/task.ts` defines the minimal `MeshTask` shape.
+- `src/query-context.ts` resolves `contextRef + query` into relevant session-entry snippets with exact keyword retrieval.
+- `src/extension.ts` registers the Pi tools and wires the optional child-runner/subagent adapter used by the deterministic test.
+
+## Message protocol
+
+```ts
+interface MeshMessage {
+  sender: string;
+  receiver: string;
+  summary: string;
+  contextRef: string;
+}
+```
+
+`summary` and `contextRef` are mandatory. `contextRef` must start with `ctx:`. Full transcripts are not legal message payloads.
+
+## Context references
+
+The prototype uses:
 
 ```text
-task_id
-parent_task_id
-objective
-context_ref
-status
+ctx:pi-session:<session-id>#leaf:<entry-id>
 ```
 
-### Context
-
-A context is a persistent JSON object addressed as `ctx:<id>`. The prototype stores contexts in a filesystem JSON file through `JsonContextStore`.
-
-### Inter-agent message
-
-```text
-sender
-receiver
-summary
-context_ref
-```
-
-`summary` and `context_ref` are mandatory. Creating a message without either value raises `ValueError`.
+This maps to Pi session state rather than copying context. The reference is opaque to the model/tool caller except for passing it back to `query_context`.
 
 ## Context querying
 
-Workers call:
+`query_context({ contextRef, query, limit })` parses the context reference, locates the registered Pi session, extracts branch entries, and returns matching text snippets. Retrieval is intentionally simple keyword search for the vertical slice.
 
-```python
-query_context(context_ref, query)
-```
+## Child agent creation
 
-The store returns matching lines from the referenced full context. This is intentionally exact/simple text retrieval, not vector search.
+The extension is written around Pi's subagent pattern instead of a new runtime. The production adapter should delegate to the existing Pi subagent/SDK mechanism. In tests, `ChildRunner` is a deterministic adapter that proves the exact information flow without requiring a live LLM.
 
-## Worker model
+## Persistence
 
-Workers are plain stateless callables. Task and context state live in `ContextMeshHarness` and `JsonContextStore`, not in persistent agent identities.
-
-## Test scenario
-
-The automated test creates a parent task containing a fictional PLC rule and candidate function, spawns a child task with only a summary and `ctx:T1`, verifies the child cannot see the full parent context until it queries `ctx:T1`, records the child's evidence in its own context, returns only a summary plus `ctx:T2`, and verifies the parent can query `ctx:T2` for evidence.
+Task metadata is appended as a Pi `custom` entry so it remains persisted but not part of normal LLM context. Child results are appended as compact `custom_message` entries so the parent sees only the summary plus child `contextRef`.
 
 ## Known limitations
 
-- This is not wired into a real Pi extension API because this checkout did not include Pi source or extension hooks.
-- Retrieval is simple line filtering.
-- Worker execution is synchronous and in-process.
-- There is no production scheduler, authentication, distributed coordination, or vector index.
+- The prototype does not implement a scheduler, worker pool, vector retrieval, UI, auth, or distributed coordination.
+- Session lookup is in-memory in `SessionContextIndex`; v0.2 should use Pi's real session file index or a tiny extension-owned index.
+- The child agent is represented by a `ChildRunner` adapter to keep the extension reversible and testable without modifying Pi core.
